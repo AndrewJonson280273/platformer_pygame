@@ -4,14 +4,13 @@ import os
 import pytmx.pytmx
 from pytmx.util_pygame import load_pygame
 
-SCALE = 5
-GROUND_LEVEL = 800
-GRAVITY = 1
-JUMP_V = 13
-WALK_V = 8
-SPRINT_V = 12
-V_MAX = 100
-debug_text = []
+SCALE = 5  # масштаб игры (1 - виден весь уровень, 5 - виден игрок и по 7-8 тайлов влево и вправо)
+GRAVITY = 1 * SCALE / 5  # константа графитации
+JUMP_V = 13 * SCALE / 5  # скорость прыжка
+WALK_V = 8 * SCALE / 5  # скорость ходьбы
+SPRINT_V = 12 * SCALE / 5  # скорость бега
+V_MAX = 100  # ограничение скорости
+
 
 
 def load_image(name):
@@ -37,7 +36,7 @@ def gen_level(name):
         Возвращает кортеж с загруженным уровнем и размером тайла в пикселях """
     level = load_pygame(name)  # получаем уровень
     scale = player.rect.height // 2  # высота(ширина) тайла - пол высоты игрока
-    # tile_width = level.tilewidth  # сколько пикселей тайл в ширину(высоту)
+    tile_width = level.tilewidth  # сколько пикселей тайл в ширину(высоту)
     for layer in level.visible_layers:
         if isinstance(layer, pytmx.pytmx.TiledTileLayer):
             for x, y, gid in layer:
@@ -46,17 +45,18 @@ def gen_level(name):
                     image_tile = pygame.transform.scale(image_tile, [scale, scale])
                     tile = Tile(image_tile, (x * scale, y * scale))
                     if layer.name == "collide":
-                        tile.add(collide_tiles)
+                        tile.solid = True
                     if level.get_tile_properties_by_gid(gid):
                         if level.get_tile_properties_by_gid(gid)["type"] == "spikes":
-                            tile.add(spikes)
+                            tile.killing = True
                     tile.add(all_sprites)
     for obj in level.objects:
         # print(obj.x, obj.y)
         if obj.visible:
             if obj.type == "Player" and obj.name == "Spawn":
-                player.rect.x = obj.x * SCALE * player.scale
-                player.rect.y = obj.y * SCALE * player.scale
+                player.rect.x = obj.x / tile_width * scale
+                player.rect.y = obj.y / tile_width * scale
+    all_sprites.level = level  # сообщаем группе об уровне
     return level, scale
 
 
@@ -80,13 +80,21 @@ class Tile(pygame.sprite.Sprite):
 
     position - кортеж с координатами в пикселях (x, y)"""
 
-    def __init__(self, image, position, mask=True):
+    def __init__(self, image, position, mask=True, solid=False, killing=False):
         pygame.sprite.Sprite.__init__(self)
         self.image = image  # уставливается текстура
         # self.area = screen.get_rect()  # ?
         self.rect = pygame.Rect(position[0], position[1], self.image.get_width(), self.image.get_height())
         if mask:
             self.mask = pygame.mask.from_surface(self.image)
+        self.solid = solid
+        self.killing = killing
+
+    def update(self):
+        if self.solid: self.add(collide_tiles)
+        else: self.remove(collide_tiles)
+        if self.killing: self.add(killing_group)
+        else: self.remove(killing_group)
 
 
 class Player(pygame.sprite.Sprite):
@@ -108,6 +116,7 @@ class Player(pygame.sprite.Sprite):
         self.src_image = self.image  # запоминаем как было
         # ширина - пол высоты
         self.rect = pygame.Rect(pos[0], pos[1], self.image.get_height() // 2, self.image.get_height())
+        self.mask = pygame.mask.from_surface(pygame.surface.Surface(self.rect.size))
         self.jumping = False  # прыжок
         self.onGround = False  # тег "на земле"
         self.velocity = [0, 0]  # вектор скорости
@@ -153,11 +162,17 @@ class Player(pygame.sprite.Sprite):
         self.rect.y += self.velocity[1]  # применяем вектор скорости к у оси
         self.check_y_collisions()  # проверяем столкновения
 
+        self.check_touch_danger()
+
+    def check_touch_danger(self):
+        spike_collisions = []
+        for spike in killing_group.sprites():
+            spike_collisions.append(pygame.sprite.collide_mask(self, spike))
+        if any(spike_collisions):
+            self.kill()
+
     def check_x_collisions(self):
         collisions = pygame.sprite.spritecollide(self, collide_tiles, False)
-        spike_collisions = []
-        for spike in spikes.sprites():
-            spike_collisions.append(pygame.sprite.collide_mask(self, spike))
 
         for tile in collisions:  # для каждого тайла, с которым можно сталкиваться
             if self.velocity[0] > 0:  # если направляемся вправо
@@ -167,15 +182,8 @@ class Player(pygame.sprite.Sprite):
                 self.rect.left = tile.rect.right  # спотыкаемся
                 self.velocity[0] = 0  # лежим
 
-        for spike in spike_collisions:
-            if spike:
-                player.kill()
-
     def check_y_collisions(self):
         collisions = pygame.sprite.spritecollide(self, collide_tiles, False)
-        spike_collisions = []
-        for spike in spikes.sprites():
-            spike_collisions.append(pygame.sprite.collide_mask(self, spike))
 
         for tile in collisions:  # для каждого тайла, с которым можно сталкиваться
             if self.velocity[1] > 0:  # если летим вниз
@@ -185,10 +193,6 @@ class Player(pygame.sprite.Sprite):
             elif self.velocity[1] < 0:  # если прягаем вверх
                 self.rect.top = tile.rect.bottom  # ударёмся головой
                 self.velocity[1] = 0  # не мотаем головой лишний раз
-
-        for spike in spike_collisions:
-            if spike:
-                player.kill()
 
 
 class CameraGroup(pygame.sprite.Group):
@@ -207,16 +211,20 @@ class CameraGroup(pygame.sprite.Group):
         self.camera_borders = {'left': screen.get_width() * 0.4,
                                'right': screen.get_width() * 0.4,
                                'top': screen.get_height() * 0.2,
-                               'bottom': screen.get_height() * 0.3}
+                               'bottom': screen.get_height() * 0.2}
         l = self.camera_borders['left']
         t = self.camera_borders['top']
         w = self.display_surface.get_size()[0] - (self.camera_borders['left'] + self.camera_borders['right'])
         h = self.display_surface.get_size()[1] - (self.camera_borders['top'] + self.camera_borders['bottom'])
         self.camera_rect = pygame.Rect(l, t, w, h)
 
+        self.level = None
+        self.bg_image = "bg.jpg"
+
         # ground
-        self.ground_surf = load_image("bg.jpg")[0]
-        self.ground_rect = self.ground_surf.get_rect(topleft=(0, 0))
+        self.background_surf = load_image(self.bg_image)[0]
+        # self.background_surf = pygame.transform.scale(self.background_surf, (screen.get_width()*3, self.background_surf.get_height()))
+        self.background_rect = self.background_surf.get_rect(topleft=(0, 0))
 
         # camera speed
         self.keyboard_speed = 5
@@ -253,6 +261,14 @@ class CameraGroup(pygame.sprite.Group):
 
     def custom_draw(self, player):
 
+        if self.level:
+            width = self.level.width * level.tilewidth * player.scale * SCALE
+            height = self.level.height * level.tilewidth * player.scale * SCALE
+            if self.background_surf.get_width() != width:
+                self.background_surf = load_image(self.bg_image)[0]
+                self.background_surf = pygame.transform.scale(self.background_surf, (width, height))
+                self.background_rect = self.background_surf.get_rect(topleft=(0, 0))
+
         # self.center_target_camera(player)
         self.box_target_camera(player)
         # self.keyboard_control()
@@ -262,8 +278,8 @@ class CameraGroup(pygame.sprite.Group):
         self.internal_surf.fill('#71ddee')  # льём небо
 
         # ground
-        ground_offset = self.ground_rect.topleft - self.offset + self.internal_offset
-        self.internal_surf.blit(self.ground_surf, ground_offset)
+        ground_offset = self.background_rect.topleft - self.offset + self.internal_offset
+        self.internal_surf.blit(self.background_surf, ground_offset)
 
         # active elements
         for sprite in self.sprites():
@@ -293,7 +309,7 @@ dt = 0  # что это воще
 all_sprites = CameraGroup()  # группа всех спрайтов, что движимы камерой
 player_group = pygame.sprite.Group()  # группа игрока, ладно
 collide_tiles = pygame.sprite.Group()  # группа всех спрайтов, что божьей силой не дают провалиться сквозь них
-spikes = pygame.sprite.Group()
+killing_group = pygame.sprite.Group()
 
 player = Player((0, 0))  # первое зарождение игрока, и да, когда-то давно он жил на (0;0), и что?
 player.add(player_group)  # инвайтим в группу
@@ -302,6 +318,7 @@ level, level_scale = gen_level("levels/test_level.tmx")  # да, сначала 
 
 player.add(all_sprites)  # он такое же существо, как и все эти... камни?
 
+debug_text = []
 DEBUG_MODE = False
 
 while running:
